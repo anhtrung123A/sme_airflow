@@ -1,0 +1,79 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.python-version
+.venv/
+venv/
+env/
+
+# Airflow
+airflow.db
+airflow-webserver.pid
+airflow.cfg
+standalone_admin_password.txt
+
+# Logs
+logs/
+*.log
+
+# DAG processor
+dag_processor_manager.log
+
+# Plugins cache
+plugins/__pycache__/
+
+# Pytest
+.pytest_cache/
+
+# Mypy
+.mypy_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment variables
+.env
+.env.*
+
+# Docker
+docker-compose.override.yml
+
+# Celery
+celerybeat-schedule
+
+# SQLite
+*.sqlite
+*.sqlite3
+
+# Coverage
+.coverage
+htmlcov/
+
+# Temp
+tmp/
+temp/
+
+# Terraform (nếu có infra)
+.terraform/
+*.tfstate
+*.tfstate.*
+
+# MinIO / local storage
+data/
+storage/
+
+# Airflow generated
+unittests.cfg
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Kafka / Redis dump
+*.rdb
