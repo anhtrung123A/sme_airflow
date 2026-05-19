@@ -21,6 +21,7 @@ from typing import Any
 import pymysql
 import requests
 from airflow.decorators import dag, task
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from confluent_kafka import Producer
 from pymysql.err import IntegrityError
 from requests import Response
@@ -348,7 +349,7 @@ def publish_raw_interaction_created(
 
 @dag(
     dag_id=DAG_ID,
-    schedule=timedelta(minutes=10),
+    schedule=None,
     start_date=datetime(2026, 5, 19),
     catchup=False,
     max_active_runs=1,
@@ -475,7 +476,14 @@ def collect_facebook_comments() -> None:
             },
         )
 
-    fetch_normalize_upsert_and_publish()
+    collect_task = fetch_normalize_upsert_and_publish()
+    trigger_transform_raw_interactions = TriggerDagRunOperator(
+        task_id="trigger_transform_raw_interactions",
+        trigger_dag_id="transform_raw_interactions",
+        wait_for_completion=False,
+    )
+
+    collect_task >> trigger_transform_raw_interactions
 
 
 dag = collect_facebook_comments()
