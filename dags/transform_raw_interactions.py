@@ -23,12 +23,14 @@ import pymysql
 import requests
 from airflow import DAG
 from airflow.operators.python import PythonOperator
-from confluent_kafka import Consumer, KafkaError
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
+from confluent_kafka import Consumer, KafkaError, Producer
 
 LOGGER = logging.getLogger("airflow.task")
 
 DAG_ID = "transform_raw_interactions"
 KAFKA_TOPIC = "sme.raw.interactions"
+KAFKA_ANALYZED_TOPIC = "sme.interactions.analyzed"
 MODEL_PROVIDER = "openai"
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 PROCESSING_STATUS_PENDING = 1
@@ -85,6 +87,15 @@ def _kafka_consumer() -> Consumer:
     )
     consumer.subscribe([os.getenv("KAFKA_RAW_INTERACTIONS_TOPIC", KAFKA_TOPIC)])
     return consumer
+
+
+def _kafka_producer() -> Producer:
+    bootstrap = os.getenv("KAFKA_BOOTSTRAP_SERVERS") or os.getenv("Kafka__BootstrapServers", "kafka:9092")
+    return Producer({"bootstrap.servers": bootstrap})
+
+
+def _get_analyzed_topic() -> str:
+    return os.getenv("KAFKA_INTERACTIONS_ANALYZED_TOPIC", KAFKA_ANALYZED_TOPIC)
 
 
 def _consume_batch(consumer: Consumer, max_messages: int, poll_timeout_ms: int, max_empty_polls: int) -> list[dict[str, Any]]:
@@ -232,7 +243,7 @@ def _upsert_analysis(
     status: str,
     error_message: str | None,
     extracted: dict[str, Any] | None,
-) -> None:
+) -> int | None:
     now = utc_now_naive()
     extracted = extracted or {}
 
@@ -290,6 +301,15 @@ def _upsert_analysis(
 
     with conn.cursor() as cur:
         cur.execute(sql, params)
+        if cur.lastrowid:
+            return int(cur.lastrowid)
+
+        cur.execute(
+            "SELECT id FROM raw_interaction_analyses WHERE raw_interaction_id=%s LIMIT 1",
+            (raw_interaction_id,),
+        )
+        row = cur.fetchone()
+        return int(row["id"]) if row and row.get("id") is not None else None
 
 
 def _update_processing_status(conn: pymysql.connections.Connection, raw_interaction_id: int, status_value: int) -> None:
@@ -300,8 +320,34 @@ def _update_processing_status(conn: pymysql.connections.Connection, raw_interact
         )
 
 
+def _publish_analyzed_event(
+    producer: Producer,
+    topic: str,
+    raw: dict[str, Any],
+    raw_interaction_id: int,
+    raw_interaction_analysis_id: int | None,
+    extracted: dict[str, Any],
+) -> None:
+    payload = {
+        "event": "raw_interaction_analyzed",
+        "raw_interaction_id": raw_interaction_id,
+        "raw_interaction_analysis_id": raw_interaction_analysis_id,
+        "is_potential_lead": bool(extracted.get("is_potential_lead", False)),
+        "confidence": extracted.get("confidence"),
+        "source_platform": raw.get("source_platform"),
+        "source_type": raw.get("source_type"),
+        "created_at": utc_now_iso(),
+    }
+    producer.produce(
+        topic=topic,
+        key=str(raw_interaction_id).encode("utf-8"),
+        value=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+    )
+
+
 def transform_batch() -> None:
     consumer = _kafka_consumer()
+    producer = _kafka_producer()
     conn = _mysql_conn()
 
     max_messages = int(os.getenv("TRANSFORM_MAX_MESSAGES", "50"))
@@ -309,6 +355,7 @@ def transform_batch() -> None:
     max_empty_polls = int(os.getenv("TRANSFORM_MAX_EMPTY_POLLS", "3"))
     model_name = os.getenv("OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
     openai_api_key = _require_env("OPENAI_API_KEY")
+    analyzed_topic = _get_analyzed_topic()
 
     try:
         messages = _consume_batch(consumer, max_messages, poll_timeout_ms, max_empty_polls)
@@ -349,7 +396,7 @@ def transform_batch() -> None:
                     extracted = ai_result["output"]
                     response_json = json.dumps(ai_result["raw_response"], ensure_ascii=False)
 
-                    _upsert_analysis(
+                    analysis_id = _upsert_analysis(
                         conn=conn,
                         raw_interaction_id=rid,
                         model_name=model_name,
@@ -360,6 +407,14 @@ def transform_batch() -> None:
                         extracted=extracted,
                     )
                     _update_processing_status(conn, rid, PROCESSING_STATUS_PROCESSED)
+                    _publish_analyzed_event(
+                        producer=producer,
+                        topic=analyzed_topic,
+                        raw=raw,
+                        raw_interaction_id=rid,
+                        raw_interaction_analysis_id=analysis_id,
+                        extracted=extracted,
+                    )
                     openai_success += 1
                     processed_ids.append(rid)
 
@@ -399,6 +454,7 @@ def transform_batch() -> None:
                     )
 
             conn.commit()
+            producer.flush(10)
             consumer.commit(asynchronous=False)
         except Exception:
             conn.rollback()
@@ -418,6 +474,10 @@ def transform_batch() -> None:
     finally:
         try:
             consumer.close()
+        except Exception:
+            pass
+        try:
+            producer.flush(10)
         except Exception:
             pass
         conn.close()
@@ -441,5 +501,10 @@ with DAG(
         task_id="transform_raw_interactions",
         python_callable=transform_batch,
     )
+    trigger_load_lead_candidates = TriggerDagRunOperator(
+        task_id="trigger_load_lead_candidates",
+        trigger_dag_id="load_lead_candidates",
+        wait_for_completion=False,
+    )
 
-    transform_raw_interactions
+    transform_raw_interactions >> trigger_load_lead_candidates
