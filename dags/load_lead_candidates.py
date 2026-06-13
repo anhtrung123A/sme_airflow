@@ -27,7 +27,7 @@ LOGGER = logging.getLogger("airflow.task")
 DAG_ID = "load_lead_candidates"
 DEFAULT_KAFKA_TOPIC = "sme.interactions.analyzed"
 
-# Match backend enums
+# Match backend InteractionIntent enum
 INTENT_UNKNOWN = 0
 INTENT_COURSE_INQUIRY = 1
 INTENT_PRICE_INQUIRY = 2
@@ -35,7 +35,11 @@ INTENT_TRIAL_REQUEST = 3
 INTENT_REGISTRATION_INTENT = 4
 INTENT_SCHEDULE_INQUIRY = 5
 INTENT_LOCATION_INQUIRY = 6
+INTENT_SUPPORT_EXISTING = 20
+INTENT_COMPLAINT = 21
 INTENT_SPAM = 22
+INTENT_IRRELEVANT = 23
+INTENT_ENGAGEMENT_ONLY = 24
 
 DECISION_AUTO_CREATE_LEAD = 1
 DECISION_NEEDS_REVIEW = 2
@@ -163,20 +167,18 @@ def _intent_to_enum(intent: Any) -> int:
 
     key = intent.strip().lower()
     mapping = {
-        "course_inquiry": INTENT_COURSE_INQUIRY,
-        "inquire_course_info": INTENT_COURSE_INQUIRY,
-        "request_course_info": INTENT_COURSE_INQUIRY,
-        "inquire about course": INTENT_COURSE_INQUIRY,
-        "inquire about course enrollment": INTENT_REGISTRATION_INTENT,
-        "price_inquiry": INTENT_PRICE_INQUIRY,
-        "xin gia": INTENT_PRICE_INQUIRY,
-        "hoc phi": INTENT_PRICE_INQUIRY,
-        "trial_request": INTENT_TRIAL_REQUEST,
-        "registration_intent": INTENT_REGISTRATION_INTENT,
-        "schedule_inquiry": INTENT_SCHEDULE_INQUIRY,
-        "location_inquiry": INTENT_LOCATION_INQUIRY,
+        # Canonical enum values (PascalCase from LLM)
+        "courseinquiry": INTENT_COURSE_INQUIRY,
+        "priceinquiry": INTENT_PRICE_INQUIRY,
+        "trialrequest": INTENT_TRIAL_REQUEST,
+        "registrationintent": INTENT_REGISTRATION_INTENT,
+        "scheduleinquiry": INTENT_SCHEDULE_INQUIRY,
+        "locationinquiry": INTENT_LOCATION_INQUIRY,
+        "supportexisting": INTENT_SUPPORT_EXISTING,
+        "complaint": INTENT_COMPLAINT,
         "spam": INTENT_SPAM,
-        "not_lead": INTENT_SPAM,
+        "irrelevant": INTENT_IRRELEVANT,
+        "engagementonly": INTENT_ENGAGEMENT_ONLY,
         "unknown": INTENT_UNKNOWN,
     }
     return mapping.get(key, INTENT_UNKNOWN)
@@ -196,18 +198,20 @@ def _calculate_score(analysis: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     has_course_interest_bonus = 10 if _has_value(analysis.get("course_interest")) else 0
 
     intent = str(analysis.get("intent") or "").strip().lower()
+    # Intents that signal active purchase/enrollment interest
     intent_bonus_intents = {
-        "inbox",
-        "request_inbox",
-        "inquire",
-        "inquire_course_info",
-        "request_course_info",
-        "inquire about course",
-        "inquire about course enrollment",
+        "courseinquiry",
+        "priceinquiry",
+        "trialrequest",
+        "registrationintent",
+        "scheduleinquiry",
+        "locationinquiry",
     }
     intent_bonus = 10 if intent in intent_bonus_intents else 0
 
-    spam_or_unknown_penalty = 30 if intent in {"", "unknown", "spam", "not_lead"} else 0
+    # Non-lead intents that should suppress candidate creation
+    non_lead_intents = {"", "unknown", "spam", "irrelevant", "engagementonly", "complaint", "supportexisting"}
+    spam_or_unknown_penalty = 30 if intent in non_lead_intents else 0
 
     score = base + has_phone_bonus + has_email_bonus + has_course_interest_bonus + intent_bonus - spam_or_unknown_penalty
     score = max(0, min(100, score))
